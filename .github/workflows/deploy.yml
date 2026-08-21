@@ -1,0 +1,19 @@
+name: Deploy
+
+on:
+  push:
+    branches: [main]
+    paths-ignore:
+      - '**.md'
+
+jobs:
+  deploy:
+    runs-on: self-hosted
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build image
+        run: docker build -t watch-gallery .
+
+      - name: Restart service
+        run: docker compose -f $HOME/watch-infra/docker-compose.yml up -d --no-deps watch-gallery
