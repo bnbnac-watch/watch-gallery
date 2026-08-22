@@ -28,8 +28,7 @@
 {
   "public_url": "https://bnbnac2.duckdns.org/<uuid>.jpg",
   "success_count": 8,
-  "failed_urls": ["https://..."],
-  "expose_seconds": 600
+  "failed_urls": ["https://..."]
 }
 ```
 
@@ -43,9 +42,14 @@
 
 `PUBLIC_DOMAIN`은 정적 파일 서버가 상시 실행 중이라는 전제로 동작한다 (`watch-gallery-nginx` +
 OCI 게이트웨이 nginx가 `PUBLIC_DOMAIN` → 이 서버의 `SERVE_DIR`로 향하는 경로를 항상 열어둔다 — 한 번만
-설정, 이 서비스는 매번 건드리지 않음). 노출 제어는 서버가 아니라 **파일 존재 여부**로 한다 —
-`/build`가 그리드 이미지를 `SERVE_DIR`에 쓰고 `public_url`을 즉시 반환한 뒤, 백그라운드에서
-`EXPOSE_SECONDS` 뒤 그 파일을 삭제한다.
+설정, 이 서비스는 매번 건드리지 않음). `/build`가 그리드 이미지를 `SERVE_DIR`에 쓰고 `public_url`을
+즉시 반환한다.
+
+보관 만료는 요청 단위로 지연 삭제를 예약하지 않고, 백그라운드에서 1시간마다 `SERVE_DIR`을 훑어
+`RETENTION_SECONDS`(기본 3일)보다 오래된 파일을 지우는 방식이다. 빌드 시점에 `asyncio.sleep`으로
+삭제를 예약하는 방식은 컨테이너가 재시작되면 예약이 통째로 사라져 파일이 영영 안 지워질 수 있는데,
+보관 기간이 3일이라 재시작 없이 그 시간을 버틸 거라고 보장할 수 없다. mtime 기반 스윕은 재시작돼도
+다음 스윕에서 다시 잡아낸다.
 
 Slack의 Block Kit `image` 블록과 레거시 `attachments`는 도달성이 정상이어도 특정 도메인(예:
 터널링 서비스) 이미지를 렌더링하지 않는 경우가 있다 — 이미지를 실제로 채널에 공유할 때는
@@ -57,7 +61,7 @@ Slack의 Block Kit `image` 블록과 레거시 `attachments`는 도달성이 정
 |---|---|---|
 | `SERVE_DIR` | `/serve` | 그리드 이미지를 쓰는 경로 — 정적 파일 서버가 서빙하는 디렉토리와 동일해야 함 |
 | `PUBLIC_DOMAIN` | `bnbnac2.duckdns.org` | 응답의 `public_url`을 조합할 도메인 |
-| `EXPOSE_SECONDS` | `600` | 파일을 쓴 뒤 삭제까지 대기하는 시간 |
+| `RETENTION_SECONDS` | `259200` (3일) | 이 시간이 지난 파일을 다음 스윕(1시간 주기)에서 삭제 |
 
 ## 포트
 

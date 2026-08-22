@@ -1,6 +1,7 @@
 import asyncio
 import logging
 import os
+import time
 import uuid
 from contextlib import asynccontextmanager
 from io import BytesIO
@@ -18,7 +19,8 @@ logger = logging.getLogger(__name__)
 
 SERVE_DIR = Path(os.getenv("SERVE_DIR", "/serve"))
 PUBLIC_DOMAIN = os.getenv("PUBLIC_DOMAIN", "bnbnac2.duckdns.org")
-EXPOSE_SECONDS = int(os.getenv("EXPOSE_SECONDS", "600"))
+RETENTION_SECONDS = int(os.getenv("RETENTION_SECONDS", str(3 * 24 * 3600)))
+SWEEP_INTERVAL_SECONDS = 3600  # 보관 단위가 일 단위라 이 정도 주기면 충분
 DOWNLOAD_TIMEOUT = 15
 MAX_RETRIES = 2
 BACKOFF_SECONDS = [1, 2]
@@ -106,13 +108,28 @@ def _build_grid(images: list[Image.Image], cols: int, cell_w: int, cell_h: int) 
 
 
 # ---------------------------------------------------------------------------
-# 노출 종료 (일정 시간 후 파일 삭제 - 서버는 상시 실행, 파일 존재 여부로 노출 제어)
+# 보관 만료 정리 - 요청 단위 지연 삭제 대신 주기적으로 SERVE_DIR을 훑어서
+# RETENTION_SECONDS(기본 3일)보다 오래된 파일을 지운다. 보관 기간이 컨테이너
+# 재시작 주기보다 훨씬 길어서, 빌드 시점에 in-memory로 예약해두는 방식(예:
+# asyncio.sleep)은 재시작 시 예약이 통째로 사라져 파일이 영영 안 지워질 수 있다.
+# mtime 기반 스윕은 재시작돼도 다음 스윕에서 다시 잡아낸다.
 # ---------------------------------------------------------------------------
 
-async def _schedule_cleanup(path: Path, delay: int):
-    await asyncio.sleep(delay)
-    path.unlink(missing_ok=True)
-    logger.info("노출 종료, 삭제됨: %s", path.name)
+def _sweep_expired():
+    now = time.time()
+    for path in SERVE_DIR.glob("*.jpg"):
+        if now - path.stat().st_mtime > RETENTION_SECONDS:
+            path.unlink(missing_ok=True)
+            logger.info("보관 기간 만료, 삭제됨: %s", path.name)
+
+
+async def _sweep_loop():
+    while True:
+        try:
+            _sweep_expired()
+        except Exception as exc:
+            logger.warning("정리 스윕 실패: %s", exc)
+        await asyncio.sleep(SWEEP_INTERVAL_SECONDS)
 
 
 # ---------------------------------------------------------------------------
@@ -124,7 +141,10 @@ async def lifespan(app: FastAPI):
     global _http_client
     async with httpx.AsyncClient() as client:
         _http_client = client
+        SERVE_DIR.mkdir(parents=True, exist_ok=True)
+        sweep_task = asyncio.create_task(_sweep_loop())
         yield
+        sweep_task.cancel()
 
 
 app = FastAPI(lifespan=lifespan)
@@ -147,17 +167,14 @@ async def build(req: BuildRequest):
     output_path = _build_grid(images, req.cols, req.cell_w, req.cell_h)
     public_url = f"https://{PUBLIC_DOMAIN}/{output_path.name}"
 
-    asyncio.create_task(_schedule_cleanup(output_path, EXPOSE_SECONDS))
-
     logger.info(
-        "빌드 완료: 성공 %d장, 실패 %d장 → %s (%d초 후 삭제)",
-        len(images), len(failed_urls), public_url, EXPOSE_SECONDS,
+        "빌드 완료: 성공 %d장, 실패 %d장 → %s",
+        len(images), len(failed_urls), public_url,
     )
     return JSONResponse({
         "public_url": public_url,
         "success_count": len(images),
         "failed_urls": failed_urls,
-        "expose_seconds": EXPOSE_SECONDS,
     })
 
 
